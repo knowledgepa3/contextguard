@@ -1,0 +1,63 @@
+{
+  "name": "contextguard",
+  "version": "0.1.0",
+  "description": "Context budget management for AI applications. Visibility, governance, and health scoring for LLM context windows.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "contextguard": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "node --test dist/**/*.test.js",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "ai",
+    "llm",
+    "context",
+    "context-window",
+    "tokens",
+    "budget",
+    "governance",
+    "claude",
+    "anthropic",
+    "openai",
+    "gpt",
+    "token-counter",
+    "context-management",
+    "ai-tools",
+    "developer-tools"
+  ],
+  "author": "Advanced Consulting Experts (ACE)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ace-consulting/contextguard"
+  },
+  "homepage": "https://github.com/ace-consulting/contextguard#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.8.0"
+  }
+}

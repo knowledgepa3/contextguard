@@ -1,0 +1,10 @@
+src/
+internal/
+tsconfig.json
+.npmignore
+.gitignore
+SPRINT-*.md
+BUSINESS-CASE.md
+node_modules/
+*.test.ts
+*.test.js
