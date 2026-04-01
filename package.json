@@ -1,11 +1,11 @@
 {
-  "name": "contextguard",
+  "name": "contextguard-ai",
   "version": "0.1.0",
   "description": "Context budget management for AI applications. Visibility, governance, and health scoring for LLM context windows.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "contextguard": "dist/cli.js"
+    "contextguard-ai": "dist/cli.js"
   },
   "exports": {
     ".": {
@@ -46,9 +46,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ace-consulting/contextguard"
+    "url": "https://github.com/knowledgepa3/contextguard"
   },
-  "homepage": "https://github.com/ace-consulting/contextguard#readme",
+  "homepage": "https://github.com/knowledgepa3/contextguard#readme",
   "engines": {
     "node": ">=18.0.0"
   },
