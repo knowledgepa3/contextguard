@@ -15,6 +15,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { classifyProbativeWeight, type ProbativeWeight } from './probativeWeight.js';
 
 // ─── Public types ────────────────────────────────────────────────────
 
@@ -42,6 +43,8 @@ export interface Anchor {
   end: number;
   /** SHA-256 of `text`. Used by manifest for provenance. */
   hash: string;
+  /** ECV probative weight: high / moderate / low. */
+  probativeWeight: ProbativeWeight;
 }
 
 /** Result of extracting anchors from a source string. */
@@ -266,6 +269,7 @@ export function extractAnchors(source: string): AnchorExtractionResult {
     start: hit.start,
     end: hit.end,
     hash: sha256(hit.text),
+    probativeWeight: classifyProbativeWeight({ kind: hit.kind, text: hit.text }),
   }));
 
   return {

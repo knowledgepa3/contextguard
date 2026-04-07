@@ -19,6 +19,7 @@
 
 import { createHash } from 'node:crypto';
 import type { Anchor, AnchorKind } from './anchorExtractor.js';
+import type { ProbativeWeight } from './probativeWeight.js';
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -29,6 +30,8 @@ export type ReviveTier = 'sparkling' | 'electrolyte' | 'iv';
 export interface PreservedSpan {
   id: number;
   kind: AnchorKind;
+  /** ECV probative weight. */
+  probativeWeight: ProbativeWeight;
   /** Offset in the ORIGINAL source. */
   originalStart: number;
   /** Exclusive end offset in the ORIGINAL source. */
@@ -137,6 +140,7 @@ export function buildManifest(params: {
   const preserved: PreservedSpan[] = params.preservedAnchors.map((anchor, idx) => ({
     id: idx,
     kind: anchor.kind,
+    probativeWeight: anchor.probativeWeight,
     originalStart: anchor.start,
     originalEnd: anchor.end,
     hash: anchor.hash,

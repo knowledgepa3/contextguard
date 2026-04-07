@@ -443,12 +443,14 @@ async function main(): Promise<void> {
       const finalOutPath = outPath ?? defaultCompactedPath(parsed.file);
       writeFileSync(finalOutPath, result.compacted, 'utf-8');
 
-      // Write manifest
+      // Write manifest + GIA-compatible ledger entry
       const manifestDir = '.contextguard';
       if (!existsSync(manifestDir)) mkdirSync(manifestDir, { recursive: true });
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
       const manifestPath = join(manifestDir, `revive-${ts}.json`);
       writeFileSync(manifestPath, serializeManifest(result.manifest), 'utf-8');
+      const ledgerPath = join(manifestDir, `ledger-${ts}.json`);
+      writeFileSync(ledgerPath, JSON.stringify(result.ledgerEntry, null, 2) + '\n', 'utf-8');
 
       if (parsed.json) {
         console.log(JSON.stringify({
@@ -458,6 +460,11 @@ async function main(): Promise<void> {
           reductionPct: result.reductionPct,
           beforeGrade: result.beforeGrade.grade,
           afterGrade: result.afterGrade.grade,
+          chainGrade: result.chain.grade,
+          chainApproved: result.chain.approved,
+          chainSummary: result.chain.summary,
+          preservedByWeight: result.chain.preservedByWeight,
+          lostByWeight: result.chain.lostByWeight,
           outPath: finalOutPath,
           manifestPath,
         }, null, 2));
@@ -566,11 +573,43 @@ function printReviveResult(
   console.log(`  Preserved: ${result.manifest.preserved.length} anchors`);
   console.log(`  Dropped:   ${result.manifest.dropped.length} spans`);
   console.log('');
+
+  // ─── Evidence Chain Validation ─────────────────────────────────
+  const chain = result.chain;
+  const gradeColor =
+    chain.grade === 'A' || chain.grade === 'B'
+      ? '\x1b[32m'
+      : chain.grade === 'C' || chain.grade === 'D'
+        ? '\x1b[33m'
+        : '\x1b[31m';
+  console.log(`  \x1b[1m\x1b[36mEvidence Chain Validation\x1b[0m`);
+  console.log('  \x1b[90m' + '\u2500'.repeat(50) + '\x1b[0m');
+  printLevel('Level 1 Structural Integrity', chain.level1.passed);
+  printLevel('Level 2 Evidence Preservation', chain.level2.passed);
+  console.log(`      High probative:     ${chain.preservedByWeight.high}/${chain.preservedByWeight.high + chain.lostByWeight.high} preserved`);
+  console.log(`      Moderate probative: ${chain.preservedByWeight.moderate}/${chain.preservedByWeight.moderate + chain.lostByWeight.moderate} preserved`);
+  console.log(`      Low probative:      ${chain.preservedByWeight.low}/${chain.preservedByWeight.low + chain.lostByWeight.low} preserved`);
+  printLevel('Level 3 Drift / Addition Check', chain.level3.passed);
+  printLevel('Level 4 Recovery Sufficiency', chain.level4.passed);
+  console.log('');
+  const approval = chain.approved ? 'APPROVED FOR USE' : 'NOT APPROVED';
+  const approvalColor = chain.approved ? '\x1b[32m' : '\x1b[31m';
+  console.log(`  Chain Grade: ${gradeColor}\x1b[1m${chain.grade}\x1b[0m   ${approvalColor}${approval}\x1b[0m`);
+  console.log('');
+
   console.log(`  Output:    ${outPath}`);
   console.log(`  Manifest:  ${manifestPath}`);
+  if (result.ledgerEntry.entryHash) {
+    console.log(`  Ledger:    entryHash ${result.ledgerEntry.entryHash.slice(0, 16)}...`);
+  }
   console.log('');
   console.log(`  Felt difference: ${beforeIcon} \u2192 ${afterIcon}  Your AI just got a drink.`);
   console.log('');
+}
+
+function printLevel(name: string, passed: boolean): void {
+  const icon = passed ? '\x1b[32m\u2713\x1b[0m' : '\x1b[31m\u2717\x1b[0m';
+  console.log(`  ${icon} ${name}`);
 }
 
 main().catch((err: unknown) => {

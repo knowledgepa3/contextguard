@@ -86,64 +86,114 @@ interface RuleResult {
 }
 
 /**
- * Common assistant preamble patterns. Anchored at the start of a line.
+ * Common assistant preamble patterns. Each pattern is line-anchored
+ * (matches at start-of-text or after a newline) so we catch BOTH
+ * message-start preambles AND mid-message paragraph preambles like
+ * "...code block.\n\nLet me explain what that does."
+ *
  * Each pattern is conservative — only drops phrasings that almost
- * never carry information.
+ * never carry information. If a phrase passes one of these patterns
+ * and turns out to carry meaning in some edge case, the manifest
+ * still records it and `expand` rehydrates it byte-for-byte.
  */
+// Boundary prefix shared by all preamble patterns. Zero-width in all
+// cases so that consecutive matches don't accidentally consume each
+// other's boundary characters:
+//   - `^`              start of text (zero-width assertion)
+//   - `(?<=\n)`        preceded by a newline (zero-width lookbehind)
+//   - `(?<=[.!?]\s)`   preceded by sentence terminator + whitespace
+//
+// Without lookbehind, "Let me X. Let me Y. Let me Z." would only get
+// the first "Let me" — the trailing space of pattern #1's match would
+// eat the boundary that pattern #2 needs.
+const BOUNDARY = '(?:^|(?<=\\n)|(?<=[.!?]\\s))';
+
 const PREAMBLE_PATTERNS: Array<{ regex: RegExp; reason: string }> = [
   {
-    regex: /^(?:Sure[!,.]?|Of course[!,.]?|Certainly[!,.]?|Absolutely[!,.]?|Got it[!,.]?|Great question[!,.]?|Happy to help[!,.]?|No problem[!,.]?)\s*/i,
+    // Order matters: longer/more-specific alternatives first so the
+    // greedy regex engine doesn't match the shorter prefix and leave
+    // a tail behind ("Great question on next steps!" must not match
+    // just "Great question" and orphan "on next steps!").
+    regex: new RegExp(
+      `${BOUNDARY}(?:Great question on[^.\\n]*[.!?]?|Great question[!,.]?|Of course[!,.]?|Certainly[!,.]?|Absolutely[!,.]?|Got it[!,.]?|Happy to help[!,.]?|No problem[!,.]?|Sure[!,.]?)[ \\t]*`,
+      'gi'
+    ),
     reason: 'preamble: filler greeting',
   },
   {
-    regex: /^(?:Let me\s+[^.\n]+?\.\s*)/,
+    // "Let me…" with optional leading transitional word.
+    regex: new RegExp(
+      `${BOUNDARY}(?:(?:First|Now|Then|Next|Also|So|OK|Okay|Alright|Right|Finally),?\\s+)?[Ll]et me\\s+[^.\\n]+?\\.[ \\t]*`,
+      'g'
+    ),
     reason: 'preamble: "Let me…" announcement',
   },
   {
-    regex: /^(?:I(?:'ll| will| am going to| can)\s+[^.\n]+?\.\s*)/,
+    // "I'll/I will/I'm going to…" with optional leading transitional word.
+    regex: new RegExp(
+      `${BOUNDARY}(?:(?:First|Now|Then|Next|Also|So|OK|Okay|Alright|Right|Finally),?\\s+)?I(?:'ll| will| am going to| can|'m going to)\\s+[^.\\n]+?\\.[ \\t]*`,
+      'g'
+    ),
     reason: 'preamble: "I will…" announcement',
   },
   {
-    regex: /^(?:Here(?:'s| is)\s+(?:what|how|the))\s+[^.\n]+?[.:]\s*/i,
+    regex: new RegExp(
+      `${BOUNDARY}I would (?:recommend|suggest|like to|propose)\\s+[^.\\n]+?\\.[ \\t]*`,
+      'g'
+    ),
+    reason: 'preamble: "I would recommend…"',
+  },
+  {
+    regex: new RegExp(
+      `${BOUNDARY}Here(?:'s| is)\\s+(?:what|how|the|a)\\s+[^.\\n]+?[.:][ \\t]*`,
+      'gi'
+    ),
     reason: 'preamble: "Here is what…" announcement',
   },
 ];
 
 /**
- * Polite trailing phrases that add no information. Anchored at the
- * end of the text or before a blank line.
+ * Trailing patterns. Each pattern matches at the end of the text or
+ * before a blank line.
  */
+
 const TRAILING_PATTERNS: Array<{ regex: RegExp; reason: string }> = [
   {
-    regex: /\s*(?:Hope (?:this|that) helps[!.]?|Let me know if [^.\n]+?[.!]?|Feel free to [^.\n]+?[.!]?)\s*$/i,
+    regex: /\s*(?:Hope (?:this|that) helps[!.]?|Let me know if [^.\n]+?[.!]?|Feel free to [^.\n]+?[.!]?|Want me to [^?\n]+\?)\s*$/i,
     reason: 'trailing: polite filler',
   },
 ];
 
 function dropPreambles(text: string): RuleResult {
-  let working = text;
+  // Lookbehind-anchored global scan. Each pattern's boundary is
+  // zero-width, so the match starts at the actual preamble word — no
+  // post-processing needed. Subsequent matches' boundaries are not
+  // consumed by previous matches.
   const drops: RuleDrop[] = [];
-  // Track cumulative front-trim so subsequent matches' offsets stay
-  // anchored to the ORIGINAL `text` rather than to the shrinking
-  // `working` view. Without this, two consecutive preamble matches
-  // would both report start=0, which the manifest verifier will reject
-  // because they overlap and only one of the two real spans hashes to
-  // the recorded value.
-  let cumulativeOffset = 0;
   for (const pattern of PREAMBLE_PATTERNS) {
-    const match = working.match(pattern.regex);
-    if (match && match.index === 0) {
+    pattern.regex.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.regex.exec(text)) !== null) {
+      const start = match.index;
+      const end = match.index + match[0].length;
+      if (end <= start) {
+        pattern.regex.lastIndex = match.index + 1;
+        continue;
+      }
       drops.push({
-        start: cumulativeOffset,
-        end: cumulativeOffset + match[0].length,
-        text: match[0],
+        start,
+        end,
+        text: text.slice(start, end),
         reason: pattern.reason,
       });
-      working = working.slice(match[0].length);
-      cumulativeOffset += match[0].length;
     }
   }
-  return { output: working, drops };
+  // Note: we deliberately DO NOT compute the trimmed `output` here.
+  // compactGap will merge our drops with drops from the other rules
+  // and produce the final output in one pass. Returning the original
+  // text as `output` is correct because no rule downstream consumes
+  // it — they all read from the original gap.
+  return { output: text, drops };
 }
 
 function dropTrailing(text: string): RuleResult {
@@ -270,82 +320,24 @@ function compactGap(
   gap: string,
   gapStartInMessage: number
 ): { compacted: string; gapDrops: SparklingDrop[] } {
-  // Apply rules in order. Each rule sees the gap text as a fresh slate,
-  // but we re-base the drop offsets onto gapStartInMessage so the manifest
-  // can locate them in the message body.
-  let working = gap;
+  // Run every rule against the ORIGINAL gap. Each rule emits drops
+  // with gap-relative offsets. We then merge overlapping drops and
+  // build the final compacted output by removing the merged set in
+  // one pass. This avoids cascading offset rebases.
+  const ruleResults: RuleDrop[][] = [
+    dropPreambles(gap).drops,
+    dropTrailing(gap).drops,
+    collapseBlankLines(gap).drops,
+    trimTrailingWhitespace(gap).drops,
+  ];
+
   const allDrops: RuleDrop[] = [];
+  for (const drops of ruleResults) allDrops.push(...drops);
 
-  const r1 = dropPreambles(working);
-  // r1.drops are offsets into `gap` (because we passed gap as input).
-  // After r1, `working` is shorter. We need to keep r1.drops as-is
-  // (they reference the original gap), but subsequent rule outputs
-  // will be relative to the trimmed `working`. To keep things simple,
-  // we re-extract drops by diffing `working` vs `gap` after each rule.
-  allDrops.push(...r1.drops);
-  working = r1.output;
+  const merged = mergeOverlappingDrops(allDrops, gap);
+  const compacted = removeDrops(gap, merged);
 
-  // For trailing patterns, the offset is relative to `working`, not
-  // `gap`. We rebase by tracking how much we trimmed off the front.
-  const headerTrim = gap.length - working.length;
-  const r2 = dropTrailing(working);
-  for (const d of r2.drops) {
-    allDrops.push({
-      start: d.start + headerTrim,
-      end: d.end + headerTrim,
-      text: d.text,
-      reason: d.reason,
-    });
-  }
-  working = r2.output;
-
-  // Collapse blank lines and trim trailing whitespace, both work on the
-  // current `working` text. We rebase their drop offsets relative to
-  // the ORIGINAL gap by reasoning about cumulative deletion.
-  // Simpler approach: re-run these two rules against the original gap
-  // (so offsets are gap-relative), then apply both to the current
-  // working text to produce the final output.
-  const r3FromGap = collapseBlankLines(gap);
-  const r4FromGap = trimTrailingWhitespace(gap);
-  // Drops from r3 and r4 are offsets into `gap`. They may overlap with
-  // preamble/trailing drops that we already recorded — dedupe by
-  // (start,end) before pushing.
-  const seen = new Set<string>();
-  for (const d of allDrops) seen.add(`${d.start}:${d.end}`);
-  for (const d of r3FromGap.drops) {
-    const key = `${d.start}:${d.end}`;
-    if (!seen.has(key)) {
-      allDrops.push(d);
-      seen.add(key);
-    }
-  }
-  for (const d of r4FromGap.drops) {
-    const key = `${d.start}:${d.end}`;
-    if (!seen.has(key)) {
-      allDrops.push(d);
-      seen.add(key);
-    }
-  }
-
-  // Apply r3 and r4 to the current `working` to produce the final
-  // compacted gap. Use the rule outputs directly (they were computed
-  // from the original gap), but only if `working` still equals gap.
-  // If preambles/trailing already trimmed `working`, we need to apply
-  // r3/r4 to `working` instead.
-  let finalOutput = working;
-  if (finalOutput === gap) {
-    // No preamble/trailing trim happened, use the gap-level outputs.
-    // Apply both transforms in sequence on the gap.
-    finalOutput = collapseBlankLines(finalOutput).output;
-    finalOutput = trimTrailingWhitespace(finalOutput).output;
-  } else {
-    finalOutput = collapseBlankLines(finalOutput).output;
-    finalOutput = trimTrailingWhitespace(finalOutput).output;
-  }
-
-  // Sort drops and rebase to message offsets.
-  allDrops.sort((a, b) => a.start - b.start);
-  const gapDrops: SparklingDrop[] = allDrops.map((d) => ({
+  const gapDrops: SparklingDrop[] = merged.map((d) => ({
     messageIndex: -1, // filled in by caller
     startInMessage: gapStartInMessage + d.start,
     endInMessage: gapStartInMessage + d.end,
@@ -353,7 +345,48 @@ function compactGap(
     reason: d.reason,
   }));
 
-  return { compacted: finalOutput, gapDrops };
+  return { compacted, gapDrops };
+}
+
+/**
+ * Merge overlapping drops into non-overlapping ranges. When two drops
+ * overlap, the merged range covers both and uses the union's text.
+ * This is required for the manifest verifier: if we recorded two drops
+ * at the same start offset, the verifier would slice the same range
+ * twice and see only the longer text on both lookups, mismatching the
+ * shorter drop's hash.
+ */
+function mergeOverlappingDrops(drops: RuleDrop[], source: string): RuleDrop[] {
+  if (drops.length === 0) return [];
+  const sorted = [...drops].sort((a, b) => a.start - b.start || b.end - a.end);
+  const merged: RuleDrop[] = [];
+  for (const d of sorted) {
+    if (d.end <= d.start) continue;
+    const last = merged[merged.length - 1];
+    if (last && d.start < last.end) {
+      // Overlap. Extend the previous range if d reaches further.
+      if (d.end > last.end) {
+        last.end = d.end;
+        last.text = source.slice(last.start, last.end);
+      }
+      continue;
+    }
+    merged.push({ start: d.start, end: d.end, text: d.text, reason: d.reason });
+  }
+  return merged;
+}
+
+/** Build the compacted output by removing the given (sorted, non-overlapping) drops. */
+function removeDrops(source: string, drops: RuleDrop[]): string {
+  if (drops.length === 0) return source;
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const d of drops) {
+    if (d.start > cursor) parts.push(source.slice(cursor, d.start));
+    cursor = d.end;
+  }
+  if (cursor < source.length) parts.push(source.slice(cursor));
+  return parts.join('');
 }
 
 // ─── Whole-session compaction ────────────────────────────────────────

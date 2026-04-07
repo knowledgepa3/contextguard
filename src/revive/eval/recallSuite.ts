@@ -86,6 +86,8 @@ interface FixtureReport {
   originalTokens: number;
   compactedTokens: number;
   reductionPct: number;
+  chainGrade: string;
+  chainApproved: boolean;
   pass: boolean;
 }
 
@@ -114,6 +116,10 @@ function checkRecall(fixture: Fixture, tier: ReviveTier): FixtureReport {
     }
   }
 
+  // Sprint 1 ECV enforcement: Chain Grade must be A and approved.
+  // Any missing anchor OR any grade below A is a fixture failure.
+  const chainOk = result.chain.grade === 'A' && result.chain.approved;
+
   return {
     fixture: fixture.name,
     originalAnchors: originalExtraction.anchors.length,
@@ -123,7 +129,9 @@ function checkRecall(fixture: Fixture, tier: ReviveTier): FixtureReport {
     originalTokens: result.originalTokens,
     compactedTokens: result.compactedTokens,
     reductionPct: result.reductionPct,
-    pass: missing.length === 0,
+    chainGrade: result.chain.grade,
+    chainApproved: result.chain.approved,
+    pass: missing.length === 0 && chainOk,
   };
 }
 
@@ -137,9 +145,12 @@ function truncate(text: string, max: number): string {
 function printReport(report: FixtureReport): void {
   const icon = report.pass ? '\x1b[32m\u2713\x1b[0m' : '\x1b[31m\u2717\x1b[0m';
   const reductionPctDisplay = (report.reductionPct * 100).toFixed(1);
+  const gradeColor = report.chainGrade === 'A' ? '\x1b[32m' : '\x1b[31m';
+  const approval = report.chainApproved ? 'APPROVED' : 'NOT APPROVED';
   console.log(`${icon} ${report.fixture}`);
   console.log(`    anchors: ${report.preserved}/${report.originalAnchors} preserved`);
   console.log(`    tokens:  ${report.originalTokens} -> ${report.compactedTokens} (${reductionPctDisplay}% reduction)`);
+  console.log(`    chain:   ${gradeColor}Grade ${report.chainGrade}\x1b[0m  ${approval}`);
   if (report.missing.length > 0) {
     console.log(`    \x1b[31mMISSING ANCHORS:\x1b[0m`);
     for (const m of report.missing) {

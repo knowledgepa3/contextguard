@@ -28,6 +28,13 @@ import {
   type VerifyResult,
 } from './manifest.js';
 import { compactSparklingSession } from './tiers/sparkling.js';
+import { validateChain, type ChainValidationReport } from './chainValidator.js';
+import {
+  buildLedgerEntry,
+  sealLedgerEntry,
+  type ReviveLedgerEntry,
+} from './ledgerEntry.js';
+import { createHash } from 'node:crypto';
 import { countTokensApprox } from '../engine/tokenCounter.js';
 import { assessHealth } from '../engine/healthScorer.js';
 import type { ContextHealth, ContextItem, BudgetStatus } from '../types/index.js';
@@ -36,6 +43,8 @@ import type { ContextHealth, ContextItem, BudgetStatus } from '../types/index.js
 
 export type { Anchor, AnchorKind, AnchorExtractionResult } from './anchorExtractor.js';
 export { extractAnchors, getCompactableRanges, countByKind } from './anchorExtractor.js';
+export type { ProbativeWeight } from './probativeWeight.js';
+export { classifyProbativeWeight } from './probativeWeight.js';
 export type {
   ReviveManifest,
   ReviveTier,
@@ -53,6 +62,15 @@ export {
 } from './manifest.js';
 export type { SessionMessage, ParsedSession } from './formats/jsonl.js';
 export { parseSessionJsonl, writeSessionJsonl } from './formats/jsonl.js';
+export type {
+  ChainGrade,
+  ChainCheck,
+  LevelResult,
+  ChainValidationReport,
+} from './chainValidator.js';
+export { validateChain } from './chainValidator.js';
+export type { ReviveLedgerEntry } from './ledgerEntry.js';
+export { buildLedgerEntry, sealLedgerEntry } from './ledgerEntry.js';
 
 // ─── Public API ──────────────────────────────────────────────────────
 
@@ -90,6 +108,10 @@ export interface ReviveResult {
   beforeGrade: ContextHealth;
   /** Health grade after compaction. */
   afterGrade: ContextHealth;
+  /** ECV-style chain validation report — proof that the run is lossless. */
+  chain: ChainValidationReport;
+  /** Canonical ledger envelope — GIA-compatible, self-sealed with SHA-256. */
+  ledgerEntry: ReviveLedgerEntry;
 }
 
 /**
@@ -115,11 +137,16 @@ export function revive(input: string, options: ReviveOptions = {}): ReviveResult
   const parsed = parseSessionJsonl(input);
   const sparkling = compactSparklingSession(parsed.messages);
 
-  // Re-serialize the compacted messages back to JSONL.
+  // Re-serialize the compacted messages back to JSONL for disk output.
   const compactedOutput = writeSessionJsonl(sparkling.messages);
 
+  // Build the compacted flat text — same envelope as the original flat
+  // text so the manifest's hashes and anchor offsets are all in the
+  // same universe. This is what the validator compares against.
+  const compactedFlatText = parseSessionJsonl(compactedOutput).flatText;
+
   const originalTokens = sparkling.originalTokens || countTokensApprox(parsed.flatText);
-  const compactedTokens = sparkling.compactedTokens || countTokensApprox(compactedOutput);
+  const compactedTokens = sparkling.compactedTokens || countTokensApprox(compactedFlatText);
 
   // The manifest's offsets are flat-text offsets. We rebuild the
   // canonical flat text the same way parseSessionJsonl does so verify
@@ -130,7 +157,7 @@ export function revive(input: string, options: ReviveOptions = {}): ReviveResult
     tier,
     reviveVersion: REVIVE_VERSION,
     originalSource: flatTextForManifest,
-    compactedOutput,
+    compactedOutput: compactedFlatText, // hash the flat-text view, not raw JSONL
     preservedAnchors: sparkling.preservedAnchors,
     droppedSpans: sparkling.droppedSpans,
     originalTokens,
@@ -142,6 +169,24 @@ export function revive(input: string, options: ReviveOptions = {}): ReviveResult
   const beforeGrade = quickGrade(originalTokens, parsed.messages.length);
   const afterGrade = quickGrade(compactedTokens, parsed.messages.length);
 
+  // Run the ECV chain validation. Both sides are flat text (same
+  // universe the manifest hashes were computed against), so L1 hash
+  // checks and L3 drift checks are apples-to-apples.
+  const chain = validateChain(manifest, flatTextForManifest, compactedFlatText);
+
+  // Build the canonical ledger envelope and self-seal it so GIA (or
+  // any hash-chained forensic ledger) can ingest the run as a
+  // governance event with a verifiable entry hash.
+  const unsealedLedger = buildLedgerEntry({
+    manifest,
+    chain,
+    originalTokens,
+    compactedTokens,
+  });
+  const ledgerEntry = sealLedgerEntry(unsealedLedger, (s) =>
+    createHash('sha256').update(s, 'utf8').digest('hex')
+  );
+
   return {
     compacted: compactedOutput,
     manifest,
@@ -150,6 +195,8 @@ export function revive(input: string, options: ReviveOptions = {}): ReviveResult
     reductionPct: manifest.reductionPct,
     beforeGrade,
     afterGrade,
+    chain,
+    ledgerEntry,
   };
 }
 
