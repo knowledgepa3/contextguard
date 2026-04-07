@@ -12,12 +12,16 @@
  *   [{ "role": "system", "content": "..." }, { "role": "user", "content": "..." }, ...]
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { dirname, basename, join } from 'node:path';
 import { ContextInspector } from './inspector/index.js';
 import { detectProvider } from './providers/index.js';
 import { runDemoScenario } from './demo/scenario.js';
 import { startDashboard } from './dashboard/server.js';
 import { AnalyticsStore } from './engine/analyticsStore.js';
+import { revive, serializeManifest, parseManifest, verify, expand } from './revive/index.js';
+import { parseSessionJsonl } from './revive/formats/jsonl.js';
+import type { ReviveTier } from './revive/index.js';
 import type { Message, Provider } from './types/index.js';
 
 const HELP = `
@@ -30,6 +34,9 @@ const HELP = `
   contextguard health <file>    Quick health score (no details)
   contextguard dashboard        Start web dashboard on port 4200
   contextguard stats            Show analytics from past sessions
+  contextguard revive <file>    Compact a session JSONL — your AI's drink
+  contextguard revive-verify <manifest> <original>   Prove a manifest is intact
+  contextguard revive-expand <manifest> <spanId> <original>  Rehydrate a span
   contextguard --help           Show this help
 
 \x1b[1mOPTIONS\x1b[0m
@@ -44,6 +51,15 @@ const HELP = `
   contextguard inspect conversation.json --model gpt-4o
   contextguard health messages.json --json
   contextguard dashboard --port 8080
+  contextguard revive session.jsonl --sparkling
+  contextguard revive session.jsonl --sparkling --out session.compact.jsonl
+  contextguard revive-verify manifest.json original.jsonl
+  contextguard revive-expand manifest.json 7 original.jsonl
+
+\x1b[1mREVIVE\x1b[0m
+  Sprint 1 ships the \x1b[36mSparkling\x1b[0m tier (20-30% reduction, 99% recall floor).
+  Electrolyte and IV tiers ship in Sprints 2-3.
+  Manifest stored at .contextguard/revive-{timestamp}.json by default.
 
 \x1b[1mMESSAGES FORMAT\x1b[0m
   Standard OpenAI/Anthropic messages array:
@@ -411,9 +427,150 @@ async function main(): Promise<void> {
       break;
     }
 
+    case 'revive': {
+      if (!parsed.file) {
+        console.error('Error: revive requires a file argument. Usage: contextguard revive <session.jsonl>');
+        process.exit(1);
+      }
+      const tier = parseTierFlag(args);
+      const outFlagIdx = args.indexOf('--out');
+      const outPath = outFlagIdx !== -1 && args[outFlagIdx + 1] ? args[outFlagIdx + 1] : undefined;
+
+      const sourceText = readFileSync(parsed.file, 'utf-8');
+      const result = revive(sourceText, { tier, originalPath: parsed.file, format: 'jsonl' });
+
+      // Write compacted output
+      const finalOutPath = outPath ?? defaultCompactedPath(parsed.file);
+      writeFileSync(finalOutPath, result.compacted, 'utf-8');
+
+      // Write manifest
+      const manifestDir = '.contextguard';
+      if (!existsSync(manifestDir)) mkdirSync(manifestDir, { recursive: true });
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const manifestPath = join(manifestDir, `revive-${ts}.json`);
+      writeFileSync(manifestPath, serializeManifest(result.manifest), 'utf-8');
+
+      if (parsed.json) {
+        console.log(JSON.stringify({
+          tier,
+          originalTokens: result.originalTokens,
+          compactedTokens: result.compactedTokens,
+          reductionPct: result.reductionPct,
+          beforeGrade: result.beforeGrade.grade,
+          afterGrade: result.afterGrade.grade,
+          outPath: finalOutPath,
+          manifestPath,
+        }, null, 2));
+      } else {
+        printReviveResult(tier, result, finalOutPath, manifestPath);
+      }
+      break;
+    }
+
+    case 'revive-verify': {
+      const manifestPath = args[1];
+      const originalPath = args[2];
+      if (!manifestPath || !originalPath) {
+        console.error('Error: revive-verify requires <manifest> and <original> arguments.');
+        process.exit(1);
+      }
+      const manifest = parseManifest(readFileSync(manifestPath, 'utf-8'));
+      // Reconstruct the same flat-text representation revive() used.
+      const originalSource = reconstructFlatText(readFileSync(originalPath, 'utf-8'));
+      const verifyResult = verify(manifest, originalSource);
+      if (parsed.json) {
+        console.log(JSON.stringify(verifyResult, null, 2));
+      } else {
+        const icon = verifyResult.ok ? '\x1b[32m\u2713\x1b[0m' : '\x1b[31m\u2717\x1b[0m';
+        console.log(`\n  ${icon} ${verifyResult.summary}`);
+        console.log(`    Preserved: ${verifyResult.preservedOk} ok, ${verifyResult.preservedFailed} failed`);
+        console.log(`    Dropped:   ${verifyResult.droppedOk} ok, ${verifyResult.droppedFailed} failed`);
+        console.log(`    Original intact: ${verifyResult.originalIntact}\n`);
+      }
+      if (!verifyResult.ok) process.exit(2);
+      break;
+    }
+
+    case 'revive-expand': {
+      const manifestPath = args[1];
+      const spanIdRaw = args[2];
+      const originalPath = args[3];
+      if (!manifestPath || !spanIdRaw || !originalPath) {
+        console.error('Error: revive-expand requires <manifest> <spanId> <original>.');
+        process.exit(1);
+      }
+      const spanId = parseInt(spanIdRaw, 10);
+      if (Number.isNaN(spanId)) {
+        console.error('Error: spanId must be an integer.');
+        process.exit(1);
+      }
+      const manifest = parseManifest(readFileSync(manifestPath, 'utf-8'));
+      const originalSource = reconstructFlatText(readFileSync(originalPath, 'utf-8'));
+      const expandResult = expand(manifest, spanId, originalSource);
+      if (!expandResult.verified) {
+        console.error(`Failed to expand span ${spanId}: ${expandResult.reason}`);
+        process.exit(2);
+      }
+      if (parsed.json) {
+        console.log(JSON.stringify({ spanId, text: expandResult.text }, null, 2));
+      } else {
+        console.log(expandResult.text);
+      }
+      break;
+    }
+
     default:
       console.log(HELP);
   }
+}
+
+// ─── Revive helpers ─────────────────────────────────────────────────
+
+function parseTierFlag(args: string[]): ReviveTier {
+  if (args.includes('--iv')) return 'iv';
+  if (args.includes('--electrolyte')) return 'electrolyte';
+  return 'sparkling';
+}
+
+function defaultCompactedPath(originalPath: string): string {
+  const dir = dirname(originalPath);
+  const name = basename(originalPath);
+  const dot = name.lastIndexOf('.');
+  if (dot === -1) return join(dir, `${name}.compact`);
+  return join(dir, `${name.slice(0, dot)}.compact${name.slice(dot)}`);
+}
+
+function reconstructFlatText(jsonlSource: string): string {
+  // Mirror the flat-text format produced by parseSessionJsonl so the
+  // verifier sees the same offsets the manifest references.
+  return parseSessionJsonl(jsonlSource).flatText;
+}
+
+function printReviveResult(
+  tier: ReviveTier,
+  result: ReturnType<typeof revive>,
+  outPath: string,
+  manifestPath: string
+): void {
+  const tierEmoji = tier === 'iv' ? '\u{1F489}' : tier === 'electrolyte' ? '\u{1F964}' : '\u{1F9CA}';
+  const reductionPctDisplay = (result.reductionPct * 100).toFixed(1);
+  const beforeIcon = result.beforeGrade.grade === 'A' || result.beforeGrade.grade === 'B' ? '\u2615' : '\u{1F975}';
+  const afterIcon = '\u{1F964}';
+  console.log('');
+  console.log(`  \x1b[1m\x1b[36mContextGuard Revive\x1b[0m  ${tierEmoji}  tier: \x1b[1m${tier}\x1b[0m`);
+  console.log('  \x1b[90m' + '\u2500'.repeat(50) + '\x1b[0m');
+  console.log(`  Before:  Grade \x1b[1m${result.beforeGrade.grade}\x1b[0m  (${result.originalTokens.toLocaleString()} tokens)`);
+  console.log(`  After:   Grade \x1b[1m${result.afterGrade.grade}\x1b[0m  (${result.compactedTokens.toLocaleString()} tokens)`);
+  console.log(`  Saved:   \x1b[32m${(result.originalTokens - result.compactedTokens).toLocaleString()} tokens\x1b[0m  (${reductionPctDisplay}%)`);
+  console.log('');
+  console.log(`  Preserved: ${result.manifest.preserved.length} anchors`);
+  console.log(`  Dropped:   ${result.manifest.dropped.length} spans`);
+  console.log('');
+  console.log(`  Output:    ${outPath}`);
+  console.log(`  Manifest:  ${manifestPath}`);
+  console.log('');
+  console.log(`  Felt difference: ${beforeIcon} \u2192 ${afterIcon}  Your AI just got a drink.`);
+  console.log('');
 }
 
 main().catch((err: unknown) => {

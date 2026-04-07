@@ -3,3 +3,6 @@ dist/
 internal/
 *.db
 .contextguard/
+# Revive smoke-test artifacts (compact outputs land next to fixtures)
+*.compact.jsonl
+*.compact.md

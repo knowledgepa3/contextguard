@@ -164,7 +164,8 @@ function scoreSignalToNoise(items: ContextItem[]): HealthDimension {
 }
 
 /**
- * Compute the full context health assessment
+ * Compute the full context health assessment from the current items
+ * and budget status.
  */
 export function assessHealth(items: ContextItem[], budget: BudgetStatus): ContextHealth {
   const dimensions = [
