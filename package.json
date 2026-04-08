@@ -1,6 +1,6 @@
 {
   "name": "contextguard-ai",
-  "version": "0.1.0",
+  "version": "0.2.0-sprint1",
   "description": "Context budget management for AI applications. Visibility, governance, and health scoring for LLM context windows.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
