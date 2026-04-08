@@ -143,7 +143,11 @@ export function revive(input: string, options: ReviveOptions = {}): ReviveResult
   // Build the compacted flat text — same envelope as the original flat
   // text so the manifest's hashes and anchor offsets are all in the
   // same universe. This is what the validator compares against.
-  const compactedFlatText = parseSessionJsonl(compactedOutput).flatText;
+  // Keep the parsed form around so validateChain can run per-message
+  // anchor extraction (kills ghost anchors on real sessions — see
+  // docs/SPRINT-2-DRIFT-DIAGNOSIS.md).
+  const parsedCompacted = parseSessionJsonl(compactedOutput);
+  const compactedFlatText = parsedCompacted.flatText;
 
   const originalTokens = sparkling.originalTokens || countTokensApprox(parsed.flatText);
   const compactedTokens = sparkling.compactedTokens || countTokensApprox(compactedFlatText);
@@ -169,10 +173,21 @@ export function revive(input: string, options: ReviveOptions = {}): ReviveResult
   const beforeGrade = quickGrade(originalTokens, parsed.messages.length);
   const afterGrade = quickGrade(compactedTokens, parsed.messages.length);
 
-  // Run the ECV chain validation. Both sides are flat text (same
-  // universe the manifest hashes were computed against), so L1 hash
-  // checks and L3 drift checks are apples-to-apples.
-  const chain = validateChain(manifest, flatTextForManifest, compactedFlatText);
+  // Run the ECV chain validation. L1 (structural) still needs the
+  // flat-text views because the manifest's hashes and offsets are
+  // keyed off them. L2/L3 (evidence + drift) use the parsed sessions
+  // so anchor extraction happens per-message, matching Sparkling's
+  // extraction strategy. Without this, real sessions produce ghost
+  // anchors (lazy code-block regex spanning hundreds of KB across
+  // message boundaries in the flat view) and chain Grade F even when
+  // the compaction is actually lossless.
+  const chain = validateChain(
+    manifest,
+    flatTextForManifest,
+    compactedFlatText,
+    parsed,
+    parsedCompacted
+  );
 
   // Build the canonical ledger envelope and self-seal it so GIA (or
   // any hash-chained forensic ledger) can ingest the run as a

@@ -51,6 +51,7 @@ import { createHash } from 'node:crypto';
 import { extractAnchors, type Anchor } from './anchorExtractor.js';
 import { expandSpan, type ReviveManifest } from './manifest.js';
 import type { ProbativeWeight } from './probativeWeight.js';
+import type { ParsedSession, SessionMessage } from './formats/jsonl.js';
 
 /**
  * Filter out anchors that are artifacts of the synthetic `[role#N]`
@@ -76,6 +77,43 @@ function stripSyntheticHeaderAnchors(source: string, anchors: Anchor[]): Anchor[
     if (/\[(?:user|assistant|system|tool)$/.test(window)) return false;
     return true;
   });
+}
+
+/**
+ * Extract anchors per message, the same way Sparkling does.
+ *
+ * Sparkling iterates messages and calls `extractAnchors` on each
+ * message's content in isolation. The chain validator's original
+ * implementation extracted anchors from the concatenated flat-text
+ * view, which does NOT match Sparkling's extraction universe.
+ *
+ * On real Claude sessions (~3K messages, ~1.3 MB flat text), that
+ * asymmetry produced "ghost anchors" — lazy regexes (code_block
+ * fences in particular) would greedily span hundreds of kilobytes
+ * across message boundaries, creating 50 KB–340 KB "code blocks"
+ * that never existed in any single message. Those ghosts always
+ * failed the hash lookup against `manifest.preserved` because
+ * Sparkling had never produced them, leading to false "lost high
+ * anchor" reports and a spurious Grade F.
+ *
+ * Extracting per-message on the validator side makes both sides
+ * compare the same anchor universe, killing the ghost class
+ * entirely. See `docs/SPRINT-2-DRIFT-DIAGNOSIS.md` for the full
+ * root-cause analysis and the diagnostic script.
+ *
+ * Anchors returned from this helper carry offsets that are relative
+ * to each individual message rather than to the flat text. Neither
+ * `validateLevel2` nor `validateLevel3` reads offsets from the
+ * anchor list — they only use `hash`, `kind`, `text`, and
+ * `probativeWeight` — so the offset mismatch is harmless.
+ */
+function extractAnchorsPerMessage(messages: SessionMessage[]): Anchor[] {
+  const all: Anchor[] = [];
+  for (const msg of messages) {
+    const { anchors } = extractAnchors(msg.content);
+    all.push(...anchors);
+  }
+  return all;
 }
 
 // ─── Public types ────────────────────────────────────────────────────
@@ -287,17 +325,12 @@ function validateLevel2(
 
 function validateLevel3(
   originalAnchors: Anchor[],
-  compactedOutput: string
+  compactedAnchors: Anchor[]
 ): LevelResult {
-  const compactedExtraction = extractAnchors(compactedOutput);
-  const cleanedCompactedAnchors = stripSyntheticHeaderAnchors(
-    compactedOutput,
-    compactedExtraction.anchors
-  );
   const originalHashes = new Set(originalAnchors.map((a) => a.hash));
 
   const newAnchorsInCompacted: Anchor[] = [];
-  for (const anchor of cleanedCompactedAnchors) {
+  for (const anchor of compactedAnchors) {
     if (!originalHashes.has(anchor.hash)) {
       newAnchorsInCompacted.push(anchor);
     }
@@ -309,7 +342,7 @@ function validateLevel3(
       passed: newAnchorsInCompacted.length === 0,
       detail:
         newAnchorsInCompacted.length === 0
-          ? `0 new anchors across ${compactedExtraction.anchors.length} in compacted`
+          ? `0 new anchors across ${compactedAnchors.length} in compacted`
           : `${newAnchorsInCompacted.length} ungrounded anchors: ${newAnchorsInCompacted
               .slice(0, 3)
               .map((a) => `[${a.kind}] ${truncate(a.text, 40)}`)
@@ -427,32 +460,53 @@ function computeGrade(
  * @param manifest         the manifest produced by `revive()`
  * @param originalSource   the same flat-text the manifest was built from
  * @param compactedOutput  the compacted output produced by `revive()`
+ * @param parsedOriginal   optional parsed form of the original session.
+ *                         When provided, Level 2 extracts anchors
+ *                         per-message the same way Sparkling does,
+ *                         killing the ghost-anchor class described in
+ *                         `docs/SPRINT-2-DRIFT-DIAGNOSIS.md`. When
+ *                         omitted, falls back to flat-text extraction
+ *                         with synthetic-header stripping (the legacy
+ *                         behavior, retained for non-JSONL callers).
+ * @param parsedCompacted  optional parsed form of the compacted output.
+ *                         When provided, Level 3 does the same
+ *                         per-message extraction on the compacted side.
  */
 export function validateChain(
   manifest: ReviveManifest,
   originalSource: string,
-  compactedOutput: string
+  compactedOutput: string,
+  parsedOriginal?: ParsedSession,
+  parsedCompacted?: ParsedSession
 ): ChainValidationReport {
   // Level 1 — Structural Integrity
   const level1 = validateLevel1(manifest, originalSource, compactedOutput);
 
   // Level 2 — Evidence Preservation
   // Anchors from the ORIGINAL are the ground truth for what should
-  // have been preserved. Synthetic `[role#N]` header identifiers are
-  // stripped so we compare the same anchor universe that Sparkling's
-  // per-message extraction produced.
-  const originalExtraction = extractAnchors(originalSource);
-  const cleanedOriginalAnchors = stripSyntheticHeaderAnchors(
-    originalSource,
-    originalExtraction.anchors
-  );
+  // have been preserved. Prefer per-message extraction (matches
+  // Sparkling's extraction strategy exactly, eliminates ghost anchors
+  // on real sessions). Fall back to flat-text + synthetic-header strip
+  // for callers that do not pass a parsed session (future markdown
+  // format adapter, direct library users, etc).
+  const cleanedOriginalAnchors = parsedOriginal
+    ? extractAnchorsPerMessage(parsedOriginal.messages)
+    : stripSyntheticHeaderAnchors(
+        originalSource,
+        extractAnchors(originalSource).anchors
+      );
   const level2Result = validateLevel2(manifest, cleanedOriginalAnchors);
 
   // Level 3 — Drift / Addition Check
-  // The compacted output is expected to be a flat-text view built by
-  // parseSessionJsonl, so it has the same synthetic headers. Strip
-  // them on both sides before comparing.
-  const level3 = validateLevel3(cleanedOriginalAnchors, compactedOutput);
+  // Same strategy for the compacted side: per-message when parsed,
+  // flat-text with synthetic-header strip as a fallback.
+  const cleanedCompactedAnchors = parsedCompacted
+    ? extractAnchorsPerMessage(parsedCompacted.messages)
+    : stripSyntheticHeaderAnchors(
+        compactedOutput,
+        extractAnchors(compactedOutput).anchors
+      );
+  const level3 = validateLevel3(cleanedOriginalAnchors, cleanedCompactedAnchors);
 
   // Level 4 — Recovery Sufficiency
   const level4 = validateLevel4(manifest, originalSource);
