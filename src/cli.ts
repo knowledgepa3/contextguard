@@ -251,6 +251,17 @@ function parseArgs(args: string[]): { command: string; file?: string; model: str
       provider = args[++i] as Provider;
     } else if (arg === '--json') {
       json = true;
+    } else if (arg === '--out' && args[i + 1]) {
+      // --out <path> is consumed by the revive subcommand via a
+      // direct scan of `args`, not by this parser. Skip the value
+      // here so it doesn't get picked up as a positional `file`.
+      i++;
+    } else if (arg?.startsWith('--tier') || arg === '--sparkling' || arg === '--electrolyte' || arg === '--iv') {
+      // Tier flags are consumed by parseTierFlag() in the revive
+      // subcommand. Skip them here so they don't trip the fallthrough.
+      // `--tier` may be either `--tier sparkling` or `--tier=sparkling`;
+      // consume a following positional only if it exists and isn't a flag.
+      if (arg === '--tier' && args[i + 1] && !args[i + 1]!.startsWith('--')) i++;
     } else if (!arg?.startsWith('--')) {
       file = arg;
     }
